@@ -1,0 +1,14 @@
+# Xcode & SwiftPM
+.build/
+Packages/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+.cache/
+
+# User binaries (keep source-first)
+Bubble.app
