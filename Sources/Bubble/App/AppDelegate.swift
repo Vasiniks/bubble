@@ -1,66 +1,40 @@
 import AppKit
-import SwiftUI
 
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem?
-    
-    public func applicationDidFinishLaunching(_ notification: Notification) {
-        // Run as lightweight accessory (no dock icon clutter, stays as floating overlay)
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // A second copy would register a second overlay window and fight over the hotkey.
+        if let bundleID = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).count > 1 {
+            NSApp.terminate(nil)
+            return
+        }
+
+        // Accessory: no Dock icon, no menu bar of its own.
         NSApp.setActivationPolicy(.accessory)
-        
-        // Setup Overlay Window
+        NSApp.mainMenu = makeMainMenu()
+
+        MetricsMonitor.shared.start()
         OverlayWindowController.shared.show()
-        
-        // Setup Global Hotkey (⌘ ⌥ ⌃ B)
-        GlobalHotkeyManager.shared.onHotKeyTriggered = { [weak self] in
-            self?.toggleBubble()
-        }
-        GlobalHotkeyManager.shared.register()
-        
-        // Setup Menu Bar Extra (as convenient fallback & control point)
-        setupStatusItem()
-        
-        // Re-center when screen configuration changes
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            Task { @MainActor in
-                OverlayWindowController.shared.repositionPanel(animated: true)
-            }
+        GlobalHotkeyManager.shared.register {
+            OverlayWindowController.shared.toggleExpanded()
         }
     }
-    
-    private func setupStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "Bubble")
-            button.image?.isTemplate = true
-        }
-        
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Toggle Bubble (⌘⌥⌃B)", action: #selector(toggleBubble), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Center at Camera/Notch", action: #selector(recenterBubble), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit Bubble", action: #selector(quitApp), keyEquivalent: "q"))
-        statusItem?.menu = menu
-    }
-    
-    @objc private func toggleBubble() {
-        OverlayWindowController.shared.toggle()
-    }
-    
-    @objc private func recenterBubble() {
-        OverlayWindowController.shared.repositionPanel(animated: true)
-    }
-    
-    @objc private func quitApp() {
-        NSApplication.shared.terminate(nil)
-    }
-    
-    public func applicationWillTerminate(_ notification: Notification) {
+
+    func applicationWillTerminate(_ notification: Notification) {
         GlobalHotkeyManager.shared.unregister()
+    }
+
+    /// Never shown for an accessory app, but still routes ⌘W / ⌘Q while Preferences is focused.
+    private func makeMainMenu() -> NSMenu {
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        appMenu.addItem(NSMenuItem(title: "Quit Bubble", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        let appItem = NSMenuItem()
+        appItem.submenu = appMenu
+        let mainMenu = NSMenu()
+        mainMenu.addItem(appItem)
+        return mainMenu
     }
 }

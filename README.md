@@ -1,79 +1,65 @@
 # Bubble 🫧
 
-An ultra-lightweight, minimalist macOS system performance overlay designed to hug the MacBook camera/notch.
+An ultra-lightweight macOS system monitor that lives around the MacBook camera.
 
-Pitch black, zero clutter, and near-zero CPU footprint (< 0.1% CPU, < 20MB RAM).
+Pure black, tiny, and quiet: it reads as part of the notch rather than as an app window.
 
 ```
-   ┌────────────────────────────────────────────────────────┐
-   │                       [ CAMERA ]                       │
-   │       [ CPU 12% ]  |  [ GPU 8% ]  |  [ ⚡ 3h 45m ]  | [⚙]│
-   └────────────────────────────────────────────────────────┘
+ ┌────────────────────────────────────────────────────────────┐
+ │  ▭ 4h 32m   CPU (41)   [  camera  ]   (27) GPU   ▬ 64°      │
+ └────────────────────────────────────────────────────────────┘
 ```
 
----
+## Using Bubble
 
-## Features
+| Action | Result |
+| --- | --- |
+| **⌃⌥⌘B** | Expand / collapse |
+| Click Bubble | Open Preferences |
+| Right-click Bubble | Preferences… / Quit Bubble |
 
-- **Top Camera / Notch Placement**: Positioned right at the top center of the display adjacent to the MacBook camera/notch. Snaps cleanly and blends directly into the black bezel.
-- **Dual Display Modes**:
-  - **Basic Mode (Default Pill)**:
-    - **CPU %** (all-core aggregate load)
-    - **GPU %** (hardware utilization from Apple Silicon GPU)
-    - **Battery Time / Status** (time remaining or charge state)
-    - **Settings Icon** (quick expand & preferences)
-  - **Expanded Mode (Detailed HUD)**:
-    - **CPU**: All-core total %, core count, dynamic load indicators.
-    - **GPU**: Hardware utilization %, renderer utilization, model info.
-    - **RAM**: Memory used vs total (e.g. `13.1 / 16.0 GB`), memory pressure indicator.
-    - **Power & Battery**: Real-time wattage consumption (e.g. `14.2 W`), battery %, health state, time remaining.
-    - **Network**: Real-time download (↓ KB/s or MB/s) and upload (↑ KB/s or MB/s) rates across active interfaces.
-    - **Preferences**: Configurable refresh rate (0.5s, 1.0s, 2.0s eco mode), shortcut info, and quit action.
-- **Constant Overlay**: Floats on top of all spaces and full-screen apps without stealing focus or interrupting your workflow.
-- **Global Toggle Shortcut**:
-  - **`⌘ ⌥ ⌃ B`** (`Command + Option + Control + B`): Instantly pull up or hide Bubble from anywhere on macOS.
-- **Companion Menu Bar Extra**: Subtle menu bar status icon as a fallback control point.
+**Collapsed** — CPU and GPU load rings either side of the camera, battery time remaining on the far left and CPU temperature on the far right.
 
----
+**Expanded** — the same shape grows wider and slightly taller to show CPU (user/system split), GPU, memory (`11.2 / 16 GB`), CPU temperature, network (`↑ 2.1 MB/s  ↓ 840 KB/s`), system power draw (`18.4 W`), battery percentage, charge state and time remaining.
 
-## Zero-Overhead Native Engine
+**Preferences** — launch at login, refresh rate (1 / 2 / 5 s), battery time and temperature in the compact view, and display (built-in camera display or primary display). On displays without a notch Bubble sits at the top center.
 
-Bubble runs zero external dependencies, zero shell commands, and zero spawned subprocesses (`top`, `ps`, `netstat`, etc.):
-- **CPU**: Mach host statistics (`host_statistics` with `HOST_CPU_LOAD_INFO`).
-- **GPU**: IOKit `IOAccelerator` registry `PerformanceStatistics`.
-- **Power**: IOKit `AppleSmartBattery` (`Voltage` $\times$ `Amperage` for true wattage) & `IOPSCopyPowerSourcesInfo`.
-- **Memory**: Darwin `host_statistics64` (`HOST_VM_INFO64`) + `sysctlbyname("hw.memsize")`.
-- **Network**: Darwin `getifaddrs` reading hardware interface byte counters (`ifi_ibytes`, `ifi_obytes`).
-- **Global Hotkey**: Carbon `RegisterEventHotKey` (requires **zero** Accessibility permissions).
+Unavailable metrics show `—`.
 
----
+## Lightweight by design
 
-## Build & Run
+No dependencies, no subprocesses, no Accessibility permission.
 
-### Quick Build & Launch
+- One utility-QoS timer with generous leeway; sampling pauses while the displays sleep.
+- Collapsed mode only reads CPU, GPU and (every 5 s) temperature. Memory, power and network are read only while expanded.
+- Battery state is event-driven via `IOPSNotificationCreateRunLoopSource`.
+- Metric changes are not animated, and values are quantized to display precision so unchanged samples don't re-render.
+
+Sources:
+
+- **CPU** — `host_statistics(HOST_CPU_LOAD_INFO)`
+- **GPU** — IOKit `IOAccelerator` → `PerformanceStatistics`
+- **Temperature** — IOHIDEventSystem die sensors (Apple Silicon)
+- **Memory** — `host_statistics64(HOST_VM_INFO64)`, Activity Monitor's "Memory Used" definition
+- **Power** — `AppleSmartBattery` power telemetry
+- **Battery** — `IOPSCopyPowerSourcesInfo`
+- **Network** — `sysctl(NET_RT_IFLIST2)` 64-bit counters for Wi-Fi/Ethernet
+- **Hotkey** — Carbon `RegisterEventHotKey`
+
+## Build & run
+
 ```bash
 ./build.sh run
 ```
 
-### Manual Build
-```bash
-# Build executable
-swift build -c release
-
-# Package into macOS .app bundle
-./build.sh
-```
-
-To install permanently, simply drag `Bubble.app` into `/Applications`.
-
----
+`./build.sh` alone packages `Bubble.app` without launching. Drag it into `/Applications` to keep it; launch at login requires the bundled app.
 
 ## Requirements
-- macOS 14.0 or later (Sonoma, Sequoia, and future versions)
-- Apple Silicon or Intel Mac
-- Xcode / Swift 5.9+
 
----
+- macOS 14 or later
+- Apple Silicon recommended (temperature is unavailable on Intel)
+- Swift 5.9+
 
 ## License
+
 MIT
