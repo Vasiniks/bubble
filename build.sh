@@ -63,7 +63,19 @@ codesign --force --deep --sign - "$APP_NAME" 2>/dev/null || true
 
 echo "==> Successfully created $APP_NAME!"
 
-if [ "$1" = "run" ]; then
-    echo "==> Launching Bubble..."
-    open "$APP_NAME"
-fi
+case "$1" in
+    run)
+        echo "==> Launching Bubble..."
+        open "$APP_NAME"
+        ;;
+    install)
+        DEST="/Applications/$APP_NAME"
+        echo "==> Installing to $DEST..."
+        # Quit a running copy so the bundle can be replaced cleanly.
+        pkill -x Bubble 2>/dev/null && sleep 1 || true
+        rm -rf "$DEST"
+        cp -R "$APP_NAME" "$DEST"
+        open "$DEST"
+        echo "==> Bubble is running. Press ⌃⌥⌘B to expand, click it for Preferences."
+        ;;
+esac

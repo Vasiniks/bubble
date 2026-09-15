@@ -60,14 +60,14 @@ struct BubbleView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    /// Battery · CPU  [camera]  GPU · temperature. Identical in both modes, so the rings
+    /// Temperature · CPU  [camera]  GPU · battery. Identical in both modes, so the rings
     /// stay put while the shape grows around them.
     private func topRow(_ geometry: BubbleGeometry) -> some View {
         let wing = geometry.wing(compactStatus: prefs.showsCompactStatus)
         return HStack(spacing: 0) {
             HStack(spacing: 6) {
-                if prefs.showBatteryTime {
-                    BatteryCompact(monitor: monitor)
+                if prefs.showTemperature {
+                    TemperatureCompact(monitor: monitor)
                 }
                 Spacer(minLength: 0)
                 RingLabel(text: "CPU")
@@ -83,8 +83,8 @@ struct BubbleView: View {
                 GPURing(monitor: monitor, diameter: geometry.ringDiameter)
                 RingLabel(text: "GPU")
                 Spacer(minLength: 0)
-                if prefs.showTemperature {
-                    TemperatureCompact(monitor: monitor)
+                if prefs.showBatteryTime {
+                    BatteryCompact(monitor: monitor)
                 }
             }
             .padding(.leading, 9)
@@ -219,8 +219,8 @@ private struct TemperatureCompact: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            TemperatureBar(celsius: monitor.temperature)
             Text(Format.temperature(monitor.temperature))
+            TemperatureBar(celsius: monitor.temperature)
         }
         .fixedSize()
     }

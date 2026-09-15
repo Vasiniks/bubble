@@ -1,64 +1,59 @@
 # Bubble 🫧
 
-An ultra-lightweight macOS system monitor that lives around the MacBook camera.
+A tiny, pure-black system monitor that wraps around your MacBook's camera.
 
-Pure black, tiny, and quiet: it reads as part of the notch rather than as an app window.
+![Bubble](docs/collapsed.png)
 
+Temperature and CPU on the left of the camera, GPU and battery time on the right.
+
+## Install
+
+Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
+
+```bash
+git clone https://github.com/Vasiniks/bubble.git
+cd bubble
+./build.sh install
 ```
- ┌────────────────────────────────────────────────────────────┐
- │  ▭ 4h 32m   CPU (41)   [  camera  ]   (27) GPU   ▬ 64°      │
- └────────────────────────────────────────────────────────────┘
-```
 
-## Using Bubble
+This builds Bubble, copies it to `/Applications` and launches it. Run the same command again to update.
+
+To start Bubble automatically, click it and turn on **Launch at login**.
+
+**Uninstall:** right-click Bubble → **Quit Bubble**, then delete `/Applications/Bubble.app`.
+
+## Use
 
 | Action | Result |
 | --- | --- |
 | **⌃⌥⌘B** | Expand / collapse |
-| Click Bubble | Open Preferences |
-| Right-click Bubble | Preferences… / Quit Bubble |
+| Click | Preferences |
+| Right-click | Preferences… / Quit Bubble |
 
-**Collapsed** — CPU and GPU load rings either side of the camera, battery time remaining on the far left and CPU temperature on the far right.
+**Collapsed:** CPU temperature · CPU load | camera | GPU load · battery time remaining.
 
-**Expanded** — the same shape grows wider and slightly taller to show CPU (user/system split), GPU, memory (`11.2 / 16 GB`), CPU temperature, network (`↑ 2.1 MB/s  ↓ 840 KB/s`), system power draw (`18.4 W`), battery percentage, charge state and time remaining.
+**Expanded:** the same shape grows wider to show CPU (user/system), GPU, memory, temperature, network, power draw, battery % and time remaining.
 
-**Preferences** — launch at login, refresh rate (1 / 2 / 5 s), battery time and temperature in the compact view, and display (built-in camera display or primary display). On displays without a notch Bubble sits at the top center.
+**Preferences:** launch at login, refresh rate, which extras show in the collapsed view, and which display to use. On displays without a notch, Bubble sits at the top center.
 
-Unavailable metrics show `—`.
+A metric that can't be read shows `—`.
 
-## Lightweight by design
+## Lightweight
 
-No dependencies, no subprocesses, no Accessibility permission.
+About 0.1% CPU and 14 MB of memory at idle. No dependencies, no background processes, no Accessibility permission.
 
-- One utility-QoS timer with generous leeway; sampling pauses while the displays sleep.
-- Collapsed mode only reads CPU, GPU and (every 5 s) temperature. Memory, power and network are read only while expanded.
-- Battery state is event-driven via `IOPSNotificationCreateRunLoopSource`.
-- Metric changes are not animated, and values are quantized to display precision so unchanged samples don't re-render.
+- One low-priority timer, paused while the display sleeps.
+- Memory, power and network are only read while expanded.
+- Battery updates only when macOS reports a change.
 
-Sources:
+Metrics come from native APIs: Mach host statistics (CPU, memory), IOKit (GPU, power, battery), IOHID sensors (temperature, Apple Silicon only), and `sysctl` (network).
 
-- **CPU** — `host_statistics(HOST_CPU_LOAD_INFO)`
-- **GPU** — IOKit `IOAccelerator` → `PerformanceStatistics`
-- **Temperature** — IOHIDEventSystem die sensors (Apple Silicon)
-- **Memory** — `host_statistics64(HOST_VM_INFO64)`, Activity Monitor's "Memory Used" definition
-- **Power** — `AppleSmartBattery` power telemetry
-- **Battery** — `IOPSCopyPowerSourcesInfo`
-- **Network** — `sysctl(NET_RT_IFLIST2)` 64-bit counters for Wi-Fi/Ethernet
-- **Hotkey** — Carbon `RegisterEventHotKey`
-
-## Build & run
+## Development
 
 ```bash
-./build.sh run
+./build.sh        # build Bubble.app in the repo
+./build.sh run    # build and launch it from the repo
 ```
-
-`./build.sh` alone packages `Bubble.app` without launching. Drag it into `/Applications` to keep it; launch at login requires the bundled app.
-
-## Requirements
-
-- macOS 14 or later
-- Apple Silicon recommended (temperature is unavailable on Intel)
-- Swift 5.9+
 
 ## License
 
