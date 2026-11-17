@@ -9,6 +9,14 @@ struct CPULoad: Equatable {
     var system: Int
 }
 
+/// CPU core temperatures in whole °C.
+struct CoreTemperature: Equatable {
+    /// Average over every core that is currently reporting.
+    var average: Int
+    /// Hottest single core sensor.
+    var hottest: Int
+}
+
 enum ChargeState: Equatable {
     case battery
     case charging
@@ -22,9 +30,17 @@ struct BatteryStatus: Equatable {
     var minutesRemaining: Int?
 }
 
+enum MemoryPressure: Equatable {
+    case normal
+    case warning
+    case critical
+}
+
 struct MemoryUsage: Equatable {
     var usedBytes: UInt64
     var totalBytes: UInt64
+    var swapUsedBytes: UInt64 = 0
+    var pressure: MemoryPressure = .normal
 
     var fraction: Double {
         totalBytes > 0 ? min(1, Double(usedBytes) / Double(totalBytes)) : 0
@@ -34,6 +50,29 @@ struct MemoryUsage: Equatable {
 struct NetworkRate: Equatable {
     var upBytesPerSecond: Double
     var downBytesPerSecond: Double
+}
+
+struct DiskActivity: Equatable {
+    var readBytesPerSecond: Double
+    var writeBytesPerSecond: Double
+    /// Share of the interval the disks were busy (summed read + write time), 0–100.
+    var busyPercent: Int
+}
+
+/// Fixed-length rolling window of samples for graphs (percentages, bytes/s or watts).
+/// Graphs draw 2 pt per sample, so a wider graph simply shows further back.
+struct History: Equatable {
+    static let capacity = 240
+    private(set) var values: [Float] = []
+
+    mutating func append(_ value: Double) {
+        if values.count == Self.capacity { values.removeFirst() }
+        values.append(Float(max(0, value)))
+    }
+
+    var peak: Float {
+        values.max() ?? 0
+    }
 }
 
 enum Format {
@@ -63,9 +102,26 @@ enum Format {
         return String(format: "%.1f / %.0f GB", Double(usage.usedBytes) / gib, Double(usage.totalBytes) / gib)
     }
 
+    static func memoryUsed(_ usage: MemoryUsage?) -> String {
+        guard let usage else { return unavailable }
+        return String(format: "%.1f GB", Double(usage.usedBytes) / Double(1 << 30))
+    }
+
+    static func bytes(_ bytes: UInt64) -> String {
+        let gib = Double(bytes) / Double(1 << 30)
+        if gib >= 100 { return String(format: "%.0f GB", gib) }
+        if gib >= 1 { return String(format: "%.1f GB", gib) }
+        return String(format: "%.0f MB", Double(bytes) / Double(1 << 20))
+    }
+
     static func network(_ rate: NetworkRate?) -> String {
         guard let rate else { return unavailable }
         return "↑ \(speed(rate.upBytesPerSecond))  ↓ \(speed(rate.downBytesPerSecond))"
+    }
+
+    static func diskActivity(_ activity: DiskActivity?) -> String {
+        guard let activity else { return unavailable }
+        return "R \(speed(activity.readBytesPerSecond))  W \(speed(activity.writeBytesPerSecond))"
     }
 
     static func speed(_ bytesPerSecond: Double) -> String {
@@ -73,6 +129,54 @@ enum Format {
             return String(format: "%.1f MB/s", bytesPerSecond / 1_048_576)
         }
         return String(format: "%.0f KB/s", bytesPerSecond / 1024)
+    }
+
+    static func speed(_ bytesPerSecond: Double?) -> String {
+        bytesPerSecond.map { speed($0) } ?? unavailable
+    }
+
+    /// Glance-style short rate: 0, 512K, 4.2M, 38M, 1.1G (per second implied).
+    static func rate(_ bytesPerSecond: Double?) -> String {
+        guard let value = bytesPerSecond else { return unavailable }
+        let kib = value / 1024
+        if kib < 1 { return "0" }
+        if kib < 1000 { return "\(Int(kib.rounded()))K" }
+        let mib = kib / 1024
+        if mib < 10 { return String(format: "%.1fM", mib) }
+        if mib < 1000 { return "\(Int(mib.rounded()))M" }
+        return String(format: "%.1fG", mib / 1024)
+    }
+
+    /// Short gigabytes: 0.4G, 13.4G.
+    static func gigabytes(_ bytes: UInt64?) -> String {
+        guard let bytes else { return unavailable }
+        return String(format: "%.1fG", Double(bytes) / Double(1 << 30))
+    }
+
+    static func playback(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds)
+        if total >= 3600 { return String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60) }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    static func pressure(_ pressure: MemoryPressure?) -> String {
+        switch pressure {
+        case .normal: return "normal"
+        case .warning: return "high"
+        case .critical: return "critical"
+        case nil: return ""
+        }
+    }
+
+    static func thermal(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "warm"
+        case .serious: return "throttling"
+        case .critical: return "critical"
+        @unknown default: return ""
+        }
     }
 
     /// Compact battery text: time remaining first; percentage only when no estimate applies.

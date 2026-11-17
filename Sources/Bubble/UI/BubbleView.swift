@@ -1,28 +1,9 @@
 import SwiftUI
 
-private enum Palette {
-    static let primary = Color.white.opacity(0.92)
-    static let secondary = Color.white.opacity(0.62)
-    static let tertiary = Color.white.opacity(0.38)
-    static let track = Color.white.opacity(0.14)
-    static let hairline = Color.white.opacity(0.07)
-    static let warm = Color(red: 1.0, green: 0.74, blue: 0.38)
-    static let hot = Color(red: 1.0, green: 0.46, blue: 0.40)
-
-    static func load(_ percent: Int?) -> Color {
-        guard let percent else { return primary }
-        return percent >= 90 ? hot : percent >= 75 ? warm : primary
-    }
-
-    static func temperature(_ celsius: Int?) -> Color {
-        guard let celsius else { return secondary }
-        return celsius >= 90 ? hot : celsius >= 78 ? warm : secondary
-    }
-}
-
-/// Root view. Each metric is read by its own small subview, so with Observation a new
-/// sample only re-renders the pieces whose values actually changed. Metric changes are
-/// deliberately not animated: a tween would render dozens of frames for every sample.
+/// Root view. The header row is identical in both states and pinned to the notch, so the
+/// rings stay put while the shape springs open around them and reveals the tab bar and the
+/// tab content. Each metric is read by its own small subview, so with Observation a new
+/// sample only re-renders the pieces whose values actually changed.
 struct BubbleView: View {
     let state: OverlayState
     let monitor: MetricsMonitor
@@ -31,10 +12,12 @@ struct BubbleView: View {
     var body: some View {
         let geometry = state.geometry
         let expanded = state.isExpanded
-        let size = geometry.size(expanded: expanded, compactStatus: prefs.showsCompactStatus)
-        let shape = BubbleShape(
-            flare: BubbleGeometry.flare,
-            bottomRadius: expanded ? 22 : min(14, (size.height - BubbleGeometry.flare) / 2)
+        let size = expanded ? geometry.openSize : geometry.closedSize(compactStatus: prefs.showsCompactStatus)
+        let shape = NotchShape(
+            topRadius: expanded ? BubbleGeometry.openRadii.top : BubbleGeometry.closedRadii.top,
+            bottomRadius: expanded
+                ? BubbleGeometry.openRadii.bottom
+                : min(BubbleGeometry.closedRadii.bottom, (size.height - BubbleGeometry.closedRadii.top) / 2)
         )
 
         ZStack(alignment: .top) {
@@ -42,73 +25,47 @@ struct BubbleView: View {
 
             // Fixed-width content so nothing reflows while the shape animates; the clip reveals it.
             VStack(spacing: 0) {
-                topRow(geometry)
+                Header(state: state, monitor: monitor, prefs: prefs)
                 if expanded {
-                    DetailGrid(monitor: monitor)
-                        .padding(.horizontal, BubbleGeometry.flare + 18)
-                        .transition(.asymmetric(
-                            insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.1)),
-                            removal: .opacity.animation(.easeIn(duration: 0.08))
-                        ))
+                    TabContent(state: state, monitor: monitor)
+                        .padding(.horizontal, BubbleGeometry.contentInset)
+                        .padding(.top, BubbleGeometry.contentTop)
+                        .padding(.bottom, BubbleGeometry.contentInset)
+                        .frame(width: geometry.interiorWidth, height: BubbleGeometry.contentHeight, alignment: .top)
+                        .transition(
+                            .scale(scale: 0.8, anchor: .top)
+                                .combined(with: .opacity)
+                                .animation(.smooth(duration: 0.18))
+                        )
                 }
             }
-            .frame(width: geometry.expandedSize.width, alignment: .top)
+            .frame(width: geometry.interiorWidth, alignment: .top)
             .opacity(state.isPressed ? 0.55 : 1)
         }
         .frame(width: size.width, height: size.height, alignment: .top)
         .clipShape(shape)
+        .shadow(color: expanded ? .black.opacity(0.7) : .clear, radius: expanded ? 6 : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    }
-
-    /// Temperature · CPU  [camera]  GPU · battery. Identical in both modes, so the rings
-    /// stay put while the shape grows around them.
-    private func topRow(_ geometry: BubbleGeometry) -> some View {
-        let wing = geometry.wing(compactStatus: prefs.showsCompactStatus)
-        return HStack(spacing: 0) {
-            HStack(spacing: 6) {
-                if prefs.showTemperature {
-                    TemperatureCompact(monitor: monitor)
-                }
-                Spacer(minLength: 0)
-                RingLabel(text: "CPU")
-                CPURing(monitor: monitor, diameter: geometry.ringDiameter)
-            }
-            .padding(.leading, 14)
-            .padding(.trailing, 9)
-            .frame(width: wing)
-
-            Color.clear.frame(width: geometry.centerWidth)
-
-            HStack(spacing: 6) {
-                GPURing(monitor: monitor, diameter: geometry.ringDiameter)
-                RingLabel(text: "GPU")
-                Spacer(minLength: 0)
-                if prefs.showBatteryTime {
-                    BatteryCompact(monitor: monitor)
-                }
-            }
-            .padding(.leading, 9)
-            .padding(.trailing, 14)
-            .frame(width: wing)
-        }
-        .font(.system(size: 10, weight: .medium))
-        .monospacedDigit()
-        .foregroundStyle(Palette.secondary)
-        .frame(height: geometry.topHeight)
+        .environment(\.colorScheme, .dark)
     }
 }
 
 /// Flush with the top screen edge, flared into it at the top corners, rounded at the bottom.
-struct BubbleShape: Shape {
-    var flare: CGFloat
+/// Both radii animate, so the flare deepens as the notch opens.
+struct NotchShape: Shape {
+    var topRadius: CGFloat
     var bottomRadius: CGFloat
 
-    var animatableData: CGFloat {
-        get { bottomRadius }
-        set { bottomRadius = newValue }
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(topRadius, bottomRadius) }
+        set {
+            topRadius = newValue.first
+            bottomRadius = newValue.second
+        }
     }
 
     func path(in rect: CGRect) -> Path {
+        let flare = max(0, min(topRadius, rect.width / 4, rect.height))
         let radius = max(0, min(bottomRadius, rect.height - flare, (rect.width - 2 * flare) / 2))
         let left = rect.minX + flare
         let right = rect.maxX - flare
@@ -123,19 +80,133 @@ struct BubbleShape: Shape {
     }
 }
 
-// MARK: - Rings
+// MARK: - Header
 
-private struct RingLabel: View {
-    let text: String
+/// Tabs · temperature · CPU  [camera]  GPU · battery · settings. The tab bar and settings
+/// sit outside the collapsed shape, so they're simply revealed as it grows.
+private struct Header: View {
+    let state: OverlayState
+    let monitor: MetricsMonitor
+    let prefs: Preferences
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 8, weight: .semibold))
-            .tracking(0.6)
-            .foregroundStyle(Palette.tertiary)
-            .fixedSize()
+        let geometry = state.geometry
+        let wing = geometry.wing(compactStatus: prefs.showsCompactStatus)
+        let extra = max(0, (geometry.interiorWidth - geometry.centerWidth - 2 * wing) / 2)
+
+        HStack(spacing: 0) {
+            // The tab bar and settings only exist while open, so the collapsed notch lays out
+            // and redraws nothing it can't show.
+            ZStack(alignment: .leading) {
+                if state.isExpanded {
+                    TabBar(state: state, prefs: prefs)
+                        .padding(.leading, 6)
+                        .transition(.opacity)
+                }
+            }
+            .frame(width: extra, alignment: .leading)
+
+            HStack(spacing: 6) {
+                if prefs.showTemperature {
+                    TemperatureCompact(monitor: monitor)
+                }
+                Spacer(minLength: 0)
+                SectionLabel(text: "CPU")
+                CPURing(monitor: monitor, diameter: geometry.ringDiameter)
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 9)
+            .frame(width: wing)
+
+            Color.clear.frame(width: geometry.centerWidth)
+
+            HStack(spacing: 6) {
+                GPURing(monitor: monitor, diameter: geometry.ringDiameter)
+                SectionLabel(text: "GPU")
+                Spacer(minLength: 0)
+                if prefs.showBatteryTime {
+                    BatteryCompact(monitor: monitor)
+                }
+            }
+            .padding(.leading, 9)
+            .padding(.trailing, 14)
+            .frame(width: wing)
+
+            ZStack(alignment: .trailing) {
+                if state.isExpanded {
+                    GlyphButton(symbol: "gearshape", size: 11, help: "Preferences") {
+                        PreferencesWindowController.shared.show()
+                    }
+                    .padding(.trailing, 4)
+                    .transition(.opacity)
+                }
+            }
+            .frame(width: extra, alignment: .trailing)
+        }
+        .font(.system(size: 10, weight: .medium))
+        .monospacedDigit()
+        .foregroundStyle(Palette.secondary)
+        .frame(height: geometry.topHeight)
     }
 }
+
+/// Home and, when enabled in Preferences, the terminal. Hidden when Home is the only tab.
+private struct TabBar: View {
+    let state: OverlayState
+    let prefs: Preferences
+    @Namespace private var namespace
+
+    var body: some View {
+        let tabs = prefs.terminalEnabled ? NotchTab.allCases : [.home]
+        HStack(spacing: 2) {
+            ForEach(tabs.count > 1 ? tabs : []) { tab in
+                let selected = state.tab == tab
+                Button {
+                    OverlayWindowController.shared.select(tab)
+                } label: {
+                    Image(systemName: tab.symbol)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(selected ? Palette.primary : Palette.tertiary)
+                        .frame(width: 30, height: 22)
+                        .background {
+                            if selected {
+                                Capsule()
+                                    .fill(Color.white.opacity(0.14))
+                                    .matchedGeometryEffect(id: "selection", in: namespace)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(tab.title)
+            }
+        }
+    }
+}
+
+private struct TabContent: View {
+    let state: OverlayState
+    let monitor: MetricsMonitor
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            switch state.tab {
+            case .home:
+                HomeView(state: state, monitor: monitor, media: .shared, outputs: .shared)
+                    .transition(.opacity)
+            case .terminal:
+                TerminalTab(session: .shared)
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+// MARK: - Rings
+
+// Plain SwiftUI views measured cheaper per update than drawing the wings in a Canvas
+// (3.4 vs 4.6 ms/s at a 1 s refresh, and 6 MB less memory), so the header stays as views.
 
 private struct CPURing: View {
     let monitor: MetricsMonitor
@@ -218,183 +289,15 @@ private struct TemperatureCompact: View {
     let monitor: MetricsMonitor
 
     var body: some View {
+        let celsius = monitor.temperature?.average
         HStack(spacing: 5) {
-            Text(Format.temperature(monitor.temperature))
-            TemperatureBar(celsius: monitor.temperature)
+            Text(Format.temperature(celsius))
+            MiniBar(
+                fraction: CGFloat(min(1, max(0, (Double(celsius ?? 0) - 30) / 70))),
+                color: Palette.temperature(celsius),
+                width: 14
+            )
         }
         .fixedSize()
-    }
-}
-
-private struct TemperatureBar: View {
-    let celsius: Int?
-
-    var body: some View {
-        let fraction = CGFloat(min(1, max(0, (Double(celsius ?? 0) - 30) / 70)))
-        MiniBar(fraction: fraction, color: Palette.temperature(celsius), width: 14)
-    }
-}
-
-private struct MiniBar: View {
-    let fraction: CGFloat
-    let color: Color
-    let width: CGFloat
-
-    var body: some View {
-        Capsule()
-            .fill(Palette.track)
-            .frame(width: width, height: 2.5)
-            .overlay(alignment: .leading) {
-                Capsule()
-                    .fill(color)
-                    .frame(width: max(2.5, width * fraction), height: 2.5)
-            }
-    }
-}
-
-// MARK: - Expanded detail
-
-/// Two short columns keep the expanded Bubble wide and shallow, like the collapsed one.
-private struct DetailGrid: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 28) {
-            VStack(spacing: 0) {
-                CPUDetailRow(monitor: monitor)
-                Hairline()
-                GPUDetailRow(monitor: monitor)
-                Hairline()
-                MemoryDetailRow(monitor: monitor)
-                Hairline()
-                TemperatureDetailRow(monitor: monitor)
-            }
-            VStack(spacing: 0) {
-                NetworkDetailRow(monitor: monitor)
-                Hairline()
-                PowerDetailRow(monitor: monitor)
-                Hairline()
-                BatteryDetailRow(monitor: monitor)
-                Hairline()
-                RemainingDetailRow(monitor: monitor)
-            }
-        }
-        .padding(.top, 6)
-    }
-}
-
-private struct Hairline: View {
-    var body: some View {
-        Rectangle().fill(Palette.hairline).frame(height: 0.5)
-    }
-}
-
-private struct DetailRow<Accessory: View>: View {
-    let label: String
-    let value: String
-    var note: String = ""
-    @ViewBuilder var accessory: Accessory
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Palette.tertiary)
-            Spacer(minLength: 6)
-            if !note.isEmpty {
-                Text(note)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Palette.tertiary)
-            }
-            accessory
-            Text(value)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Palette.primary)
-        }
-        .monospacedDigit()
-        .lineLimit(1)
-        .frame(height: 22)
-    }
-}
-
-extension DetailRow where Accessory == EmptyView {
-    init(label: String, value: String, note: String = "") {
-        self.init(label: label, value: value, note: note) { EmptyView() }
-    }
-}
-
-private struct CPUDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        let cpu = monitor.cpu
-        DetailRow(
-            label: "CPU",
-            value: Format.percent(cpu?.total),
-            note: cpu.map { "user \($0.user)%  ·  sys \($0.system)%" } ?? ""
-        )
-    }
-}
-
-private struct GPUDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        DetailRow(label: "GPU", value: Format.percent(monitor.gpu))
-    }
-}
-
-private struct MemoryDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        DetailRow(label: "Memory", value: Format.memory(monitor.memory)) {
-            if let memory = monitor.memory {
-                MiniBar(fraction: memory.fraction, color: Palette.load(Int(memory.fraction * 100)), width: 28)
-            }
-        }
-    }
-}
-
-private struct TemperatureDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        DetailRow(label: "Temperature", value: Format.temperature(monitor.temperature)) {
-            TemperatureBar(celsius: monitor.temperature)
-        }
-    }
-}
-
-private struct NetworkDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        DetailRow(label: "Network", value: Format.network(monitor.network))
-    }
-}
-
-private struct PowerDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        DetailRow(label: "Power", value: Format.watts(monitor.power))
-    }
-}
-
-private struct BatteryDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        DetailRow(label: "Battery", value: Format.batteryPercent(monitor.battery), note: Format.chargeState(monitor.battery))
-    }
-}
-
-private struct RemainingDetailRow: View {
-    let monitor: MetricsMonitor
-
-    var body: some View {
-        let battery = monitor.battery
-        DetailRow(label: "Remaining", value: Format.timeRemaining(battery), note: battery?.state == .charging ? "to full" : "")
     }
 }

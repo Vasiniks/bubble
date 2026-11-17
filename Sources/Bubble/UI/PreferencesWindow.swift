@@ -44,9 +44,22 @@ private struct PreferencesView: View {
                 }
             }
 
+            Section("Notch") {
+                Toggle("Open on hover", isOn: $prefs.openOnHover)
+                Toggle("Haptic feedback", isOn: $prefs.haptics)
+            }
+
+            Section {
+                Toggle("Quick terminal", isOn: $prefs.terminalEnabled)
+            } footer: {
+                Text("A terminal tab in the notch. Turning it off ends its shell.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Compact view") {
                 Toggle("Battery time", isOn: $prefs.showBatteryTime)
-                Toggle("CPU temperature", isOn: $prefs.showTemperature)
+                Toggle("CPU core temperature", isOn: $prefs.showTemperature)
             }
 
             Section {
@@ -56,7 +69,7 @@ private struct PreferencesView: View {
                     }
                 }
             } footer: {
-                Text("Press ⌃⌥⌘B to expand or collapse Bubble.")
+                Text("⌃⌥⌘B opens or closes Bubble.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

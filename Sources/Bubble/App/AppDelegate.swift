@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -10,19 +11,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Bubble talks to its helpers (media bridge, terminal shell) over pipes; a helper that
+        // exits mid-write must surface as EPIPE, not kill the app.
+        signal(SIGPIPE, SIG_IGN)
+
         // Accessory: no Dock icon, no menu bar of its own.
         NSApp.setActivationPolicy(.accessory)
         NSApp.mainMenu = makeMainMenu()
 
         MetricsMonitor.shared.start()
         OverlayWindowController.shared.show()
-        GlobalHotkeyManager.shared.register {
+        GlobalHotkeyManager.shared.register(keyCode: kVK_ANSI_B) {
             OverlayWindowController.shared.toggleExpanded()
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        GlobalHotkeyManager.shared.unregister()
+        GlobalHotkeyManager.shared.unregisterAll()
     }
 
     /// Never shown for an accessory app, but still routes ⌘W / ⌘Q while Preferences is focused.

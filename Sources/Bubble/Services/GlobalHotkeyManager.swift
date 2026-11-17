@@ -1,52 +1,71 @@
 import Carbon.HIToolbox
 
-/// ⌃⌥⌘B via Carbon's RegisterEventHotKey — the only global hotkey API that needs no
+/// ⌃⌥⌘ hotkeys via Carbon's RegisterEventHotKey — the only global hotkey API that needs no
 /// Accessibility permission. Carbon delivers hot key events on the main thread, and only
-/// once per physical press (no key repeat), so each press is exactly one toggle.
+/// once per physical press (no key repeat), so each press is exactly one action.
 @MainActor
 final class GlobalHotkeyManager {
     static let shared = GlobalHotkeyManager()
 
-    private var hotKeyRef: EventHotKeyRef?
+    private static let signature = OSType(0x4255_424C) // 'BUBL'
+
+    private var hotKeys: [EventHotKeyRef] = []
     private var handlerRef: EventHandlerRef?
-    private var action: (() -> Void)?
+    private var actions: [UInt32: () -> Void] = [:]
 
     private init() {}
 
-    func register(_ action: @escaping () -> Void) {
-        unregister()
-        self.action = action
+    /// Registers ⌃⌥⌘ + `keyCode` (a kVK_ constant).
+    func register(keyCode: Int, _ action: @escaping () -> Void) {
+        installHandler()
+        let id = UInt32(actions.count + 1)
+        actions[id] = action
 
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
-            guard let userData else { return OSStatus(eventNotHandledErr) }
-            let manager = Unmanaged<GlobalHotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-            MainActor.assumeIsolated { manager.action?() }
-            return noErr
-        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
-
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4255_424C), id: 1) // 'BUBL'
+        var hotKey: EventHotKeyRef?
         let status = RegisterEventHotKey(
-            UInt32(kVK_ANSI_B),
+            UInt32(keyCode),
             UInt32(cmdKey | optionKey | controlKey),
-            hotKeyID,
+            EventHotKeyID(signature: Self.signature, id: id),
             GetApplicationEventTarget(),
             0,
-            &hotKeyRef
+            &hotKey
         )
-        if status != noErr {
-            NSLog("Bubble: could not register ⌃⌥⌘B (%d)", status)
+        if status == noErr, let hotKey {
+            hotKeys.append(hotKey)
+        } else {
+            NSLog("Bubble: could not register hotkey %d (%d)", keyCode, status)
         }
     }
 
-    func unregister() {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
+    func unregisterAll() {
+        hotKeys.forEach { UnregisterEventHotKey($0) }
+        hotKeys = []
+        actions = [:]
         if let handlerRef {
             RemoveEventHandler(handlerRef)
             self.handlerRef = nil
         }
+    }
+
+    private func installHandler() {
+        guard handlerRef == nil else { return }
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+            guard let event, let userData else { return OSStatus(eventNotHandledErr) }
+            var hotKeyID = EventHotKeyID()
+            let status = GetEventParameter(
+                event,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &hotKeyID
+            )
+            guard status == noErr else { return status }
+            let manager = Unmanaged<GlobalHotkeyManager>.fromOpaque(userData).takeUnretainedValue()
+            MainActor.assumeIsolated { manager.actions[hotKeyID.id]?() }
+            return noErr
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
     }
 }

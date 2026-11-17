@@ -1,21 +1,29 @@
 import Darwin
+import Foundation
 import IOKit
 import IOKit.ps
 
-/// Reads raw system metrics using Mach, IOKit and sysctl. Not thread-safe; confine to one queue.
-final class SystemSampler {
+/// Reads raw system metrics using Mach, IOKit, the SMC and sysctl. Not thread-safe: it is only
+/// ever used from MetricsMonitor's serial queue, which is what makes the conformance sound.
+final class SystemSampler: @unchecked Sendable {
+    /// Everything the graphs need is read every sample: each read takes microseconds, and
+    /// while the notch is closed no view is drawing them, so the graphs are already full when
+    /// it opens.
     struct Reading {
         var cpu: CPULoad?
         var gpu: Int?
-        var temperatureSampled = false
-        var temperature: Int?
-        var detailSampled = false
+        var gpuMemory: UInt64?
         var memory: MemoryUsage?
         var power: Double?
         var network: NetworkRate?
+        var diskActivity: DiskActivity?
+        var temperatureSampled = false
+        var temperature: CoreTemperature?
+        /// Per-core load, only read while open (it's drawn only then).
+        var cores: [UInt8] = []
     }
 
-    /// Temperature changes slowly; in compact mode it is read at most this often.
+    /// Temperature changes slowly; while closed it is read at most this often.
     private static let temperatureInterval: UInt64 = 5_000_000_000
 
     // mach_host_self() adds a port reference on every call, so take it once.
@@ -25,9 +33,13 @@ final class SystemSampler {
     private let temperature = TemperatureSensor()
 
     private var lastCPUTicks: (user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)?
+    private var lastCoreTicks: [UInt32] = []
     private var lastNetwork: (up: UInt64, down: UInt64, time: UInt64)?
+    private var lastDiskIO: (read: UInt64, write: UInt64, busy: UInt64, time: UInt64)?
     private var lastTemperatureTime: UInt64 = 0
     private var gpuService: io_registry_entry_t = 0
+    private var diskDrivers: [io_registry_entry_t] = []
+    private var diskDriversAge = 0
     private var batteryService: io_registry_entry_t = 0
     private var interfaceBuffer: [UInt8] = []
     private var isCountedInterface: [UInt16: Bool] = [:]
@@ -47,32 +59,36 @@ final class SystemSampler {
 
     deinit {
         if gpuService != 0 { IOObjectRelease(gpuService) }
+        diskDrivers.forEach { IOObjectRelease($0) }
         if batteryService != 0 { IOObjectRelease(batteryService) }
         mach_port_deallocate(mach_task_self_, host)
     }
 
-    func read(detailed: Bool) -> Reading {
-        var reading = Reading(cpu: cpu(), gpu: gpu())
+    /// `open`: the notch is open, so temperature is read every sample rather than every 5 s.
+    func read(open: Bool) -> Reading {
+        let graphics = gpu()
+        var reading = Reading(
+            cpu: cpu(),
+            gpu: graphics?.utilization,
+            gpuMemory: graphics?.memory,
+            memory: memory(),
+            power: power(),
+            network: network(),
+            diskActivity: diskActivity()
+        )
 
         let now = DispatchTime.now().uptimeNanoseconds
-        if detailed || now - lastTemperatureTime >= Self.temperatureInterval {
+        if open || now - lastTemperatureTime >= Self.temperatureInterval {
             lastTemperatureTime = now
             reading.temperatureSampled = true
-            reading.temperature = temperature.read().map { Int($0.rounded()) }
+            reading.temperature = temperature.read()
         }
-
-        if detailed {
-            reading.detailSampled = true
-            reading.memory = memory()
-            reading.power = power()
-            reading.network = network()
+        if open {
+            reading.cores = coreLoads() ?? []
+        } else {
+            lastCoreTicks = []
         }
         return reading
-    }
-
-    /// Records a network baseline so the first detailed sample has a short, accurate delta.
-    func primeNetwork() {
-        _ = network()
     }
 
     // MARK: CPU
@@ -102,24 +118,52 @@ final class SystemSampler {
         return CPULoad(total: min(100, userPercent + systemPercent), user: userPercent, system: systemPercent)
     }
 
+    /// Per-core load, in the kernel's core order (efficiency cores first on Apple Silicon).
+    private func coreLoads() -> [UInt8]? {
+        var coreCount: natural_t = 0
+        var info: processor_info_array_t?
+        var infoCount: mach_msg_type_number_t = 0
+        guard host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &coreCount, &info, &infoCount) == KERN_SUCCESS, let info else {
+            return nil
+        }
+        defer {
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: info), vm_size_t(Int(infoCount) * MemoryLayout<integer_t>.stride))
+        }
+
+        let stride = Int(CPU_STATE_MAX)
+        let ticks = (0 ..< Int(coreCount) * stride).map { UInt32(bitPattern: info[$0]) }
+        defer { lastCoreTicks = ticks }
+        guard lastCoreTicks.count == ticks.count else { return nil }
+
+        return (0 ..< Int(coreCount)).map { core in
+            let base = core * stride
+            func delta(_ state: Int32) -> Double { Double(ticks[base + Int(state)] &- lastCoreTicks[base + Int(state)]) }
+            let busy = delta(CPU_STATE_USER) + delta(CPU_STATE_SYSTEM) + delta(CPU_STATE_NICE)
+            let total = busy + delta(CPU_STATE_IDLE)
+            return total > 0 ? UInt8(min(100, (busy / total * 100).rounded())) : 0
+        }
+    }
+
     // MARK: GPU
 
-    private func gpu() -> Int? {
+    /// Utilization and the memory the GPU has in use (unified memory on Apple Silicon).
+    private func gpu() -> (utilization: Int, memory: UInt64?)? {
         if gpuService == 0 {
             gpuService = Self.findGPUService()
         }
         guard gpuService != 0 else { return nil }
 
         // Read only PerformanceStatistics rather than the accelerator's full property table.
-        guard let stats = IORegistryEntryCreateCFProperty(gpuService, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0)?
-            .takeRetainedValue() as? [String: Any],
-            let utilization = stats["Device Utilization %"] as? Int
+        guard let stats = Self.dictionary(gpuService, Key.performanceStatistics),
+              let utilization = Self.number(stats, Key.deviceUtilization)
         else {
             IOObjectRelease(gpuService)
             gpuService = 0
             return nil
         }
-        return min(100, max(0, utilization))
+        let memory = Self.number(stats, Key.gpuMemoryInUse).map { UInt64(max(0, $0)) }
+        let step = UInt64(1 << 30) / 10
+        return (Int(min(100, max(0, utilization))), memory.map { ($0 + step / 2) / step * step })
     }
 
     private static func findGPUService() -> io_registry_entry_t {
@@ -130,7 +174,7 @@ final class SystemSampler {
         defer { IOObjectRelease(iterator) }
 
         while case let service = IOIteratorNext(iterator), service != 0 {
-            if IORegistryEntryCreateCFProperty(service, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0) != nil {
+            if IORegistryEntryCreateCFProperty(service, Key.performanceStatistics, kCFAllocatorDefault, 0) != nil {
                 return service
             }
             IOObjectRelease(service)
@@ -154,7 +198,76 @@ final class SystemSampler {
         let appPages = UInt64(stats.internal_page_count) - UInt64(min(stats.purgeable_count, stats.internal_page_count))
         let used = (appPages + UInt64(stats.wire_count) + UInt64(stats.compressor_page_count)) * pageSize
         let step = UInt64(1 << 30) / 10
-        return MemoryUsage(usedBytes: (used + step / 2) / step * step, totalBytes: totalMemory)
+
+        var swap = xsw_usage()
+        var swapSize = MemoryLayout<xsw_usage>.size
+        let swapUsed = sysctlbyname("vm.swapusage", &swap, &swapSize, nil, 0) == 0 ? swap.xsu_used : 0
+
+        var level: Int32 = 1
+        var levelSize = MemoryLayout<Int32>.size
+        sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &levelSize, nil, 0)
+        let pressure: MemoryPressure = level >= 4 ? .critical : level >= 2 ? .warning : .normal
+
+        return MemoryUsage(
+            usedBytes: (used + step / 2) / step * step,
+            totalBytes: totalMemory,
+            swapUsedBytes: (swapUsed + step / 2) / step * step,
+            pressure: pressure
+        )
+    }
+
+    // MARK: Disk
+
+    private func diskActivity() -> DiskActivity? {
+        // The set of block storage drivers rarely changes; look it up once a minute, not every sample.
+        if diskDrivers.isEmpty || diskDriversAge >= 60 {
+            refreshDiskDrivers()
+        }
+        diskDriversAge += 1
+
+        var read: Int64 = 0
+        var written: Int64 = 0
+        var busy: Int64 = 0 // nanoseconds spent on reads and writes, summed over requests
+        for driver in diskDrivers {
+            guard let stats = Self.dictionary(driver, Key.statistics) else {
+                diskDriversAge = 60 // A driver went away; refresh next time.
+                continue
+            }
+            read &+= Self.number(stats, Key.bytesRead) ?? 0
+            written &+= Self.number(stats, Key.bytesWritten) ?? 0
+            busy &+= Self.number(stats, Key.readTime) ?? 0
+            busy &+= Self.number(stats, Key.writeTime) ?? 0
+        }
+        let (read64, written64, busy64) = (UInt64(max(0, read)), UInt64(max(0, written)), UInt64(max(0, busy)))
+        return diskRates(read: read64, written: written64, busy: busy64)
+    }
+
+    private func refreshDiskDrivers() {
+        diskDrivers.forEach { IOObjectRelease($0) }
+        diskDrivers = []
+        diskDriversAge = 0
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &iterator) == KERN_SUCCESS else {
+            return
+        }
+        defer { IOObjectRelease(iterator) }
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            diskDrivers.append(service)
+        }
+    }
+
+    private func diskRates(read: UInt64, written: UInt64, busy: UInt64) -> DiskActivity? {
+        let now = DispatchTime.now().uptimeNanoseconds
+        defer { lastDiskIO = (read, written, busy, now) }
+        guard let last = lastDiskIO, now > last.time else { return nil }
+        let elapsed = Double(now - last.time)
+        let seconds = elapsed / 1_000_000_000
+        let busyDelta = busy >= last.busy ? Double(busy - last.busy) : 0
+        return DiskActivity(
+            readBytesPerSecond: Self.quantizeSpeed(Double(read >= last.read ? read - last.read : 0) / seconds),
+            writeBytesPerSecond: Self.quantizeSpeed(Double(written >= last.write ? written - last.write : 0) / seconds),
+            busyPercent: Int(min(100, (busyDelta / elapsed * 100).rounded()))
+        )
     }
 
     // MARK: Power & battery
@@ -189,29 +302,72 @@ final class SystemSampler {
     }
 
     private func power() -> Double? {
-        if batteryService == 0 {
-            batteryService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-        }
-        guard batteryService != 0 else { return nil }
+        guard openBatteryService() else { return nil }
 
         // The gauge's telemetry reports whole-system draw in mW, on battery and on AC alike.
-        if let telemetry = registryProperty(batteryService, "PowerTelemetryData") as? [String: Any] {
-            for key in ["SystemLoad", "SystemPowerIn"] {
-                if let milliwatts = telemetry[key] as? Int, milliwatts > 0 {
+        if let telemetry = Self.dictionary(batteryService, Key.powerTelemetry) {
+            for key in [Key.systemLoad, Key.systemPowerIn] {
+                if let milliwatts = Self.number(telemetry, key), milliwatts > 0 {
                     return (Double(milliwatts) / 100).rounded() / 10
                 }
             }
         }
-        if let millivolts = registryProperty(batteryService, "Voltage") as? Int,
-           let milliamps = registryProperty(batteryService, "InstantAmperage") as? Int,
+        if let millivolts = Self.number(batteryService, Key.voltage),
+           let milliamps = Self.number(batteryService, Key.amperage),
            millivolts * milliamps != 0 {
             return (Double(abs(millivolts * milliamps)) / 100_000).rounded() / 10
         }
         return nil
     }
 
-    private func registryProperty(_ entry: io_registry_entry_t, _ key: String) -> Any? {
-        IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+    private func openBatteryService() -> Bool {
+        if batteryService == 0 {
+            batteryService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        }
+        return batteryService != 0
+    }
+
+    // MARK: CoreFoundation access
+
+    /// Registry keys, created once. Values are read straight from the CFDictionary rather than
+    /// bridged to a Swift Dictionary, which was the costliest part of a sample.
+    private enum Key {
+        static let performanceStatistics = "PerformanceStatistics" as CFString
+        static let deviceUtilization = "Device Utilization %" as CFString
+        static let gpuMemoryInUse = "In use system memory" as CFString
+        static let statistics = "Statistics" as CFString
+        static let bytesRead = "Bytes (Read)" as CFString
+        static let bytesWritten = "Bytes (Write)" as CFString
+        static let readTime = "Total Time (Read)" as CFString
+        static let writeTime = "Total Time (Write)" as CFString
+        static let powerTelemetry = "PowerTelemetryData" as CFString
+        static let systemLoad = "SystemLoad" as CFString
+        static let systemPowerIn = "SystemPowerIn" as CFString
+        static let voltage = "Voltage" as CFString
+        static let amperage = "InstantAmperage" as CFString
+    }
+
+    private static func dictionary(_ entry: io_registry_entry_t, _ key: CFString) -> CFDictionary? {
+        guard let value = IORegistryEntryCreateCFProperty(entry, key, kCFAllocatorDefault, 0)?.takeRetainedValue(),
+              CFGetTypeID(value) == CFDictionaryGetTypeID()
+        else { return nil }
+        return unsafeBitCast(value, to: CFDictionary.self)
+    }
+
+    private static func number(_ entry: io_registry_entry_t, _ key: CFString) -> Int64? {
+        guard let value = IORegistryEntryCreateCFProperty(entry, key, kCFAllocatorDefault, 0)?.takeRetainedValue() else { return nil }
+        return number(value)
+    }
+
+    private static func number(_ dictionary: CFDictionary, _ key: CFString) -> Int64? {
+        guard let raw = CFDictionaryGetValue(dictionary, Unmanaged.passUnretained(key).toOpaque()) else { return nil }
+        return number(Unmanaged<CFTypeRef>.fromOpaque(raw).takeUnretainedValue())
+    }
+
+    private static func number(_ value: CFTypeRef) -> Int64? {
+        guard CFGetTypeID(value) == CFNumberGetTypeID() else { return nil }
+        var result: Int64 = 0
+        return CFNumberGetValue(unsafeBitCast(value, to: CFNumber.self), .sInt64Type, &result) ? result : nil
     }
 
     // MARK: Network

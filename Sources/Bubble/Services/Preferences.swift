@@ -28,6 +28,9 @@ final class Preferences {
         static let showBatteryTime = "showBatteryTime"
         static let showTemperature = "showTemperature"
         static let display = "display"
+        static let openOnHover = "openOnHover"
+        static let haptics = "haptics"
+        static let terminalEnabled = "terminalEnabled"
     }
 
     var refreshInterval: TimeInterval {
@@ -46,6 +49,21 @@ final class Preferences {
         didSet { persist(display.rawValue, Key.display) }
     }
 
+    /// Hovering the notch for a moment opens it, as well as clicking.
+    var openOnHover: Bool {
+        didSet { persist(openOnHover, Key.openOnHover) }
+    }
+
+    /// A trackpad tick when the pointer reaches the notch or a swipe opens it.
+    var haptics: Bool {
+        didSet { persist(haptics, Key.haptics) }
+    }
+
+    /// The quick terminal tab. Off, no shell process ever runs.
+    var terminalEnabled: Bool {
+        didSet { persist(terminalEnabled, Key.terminalEnabled) }
+    }
+
     private(set) var launchAtLogin: Bool
 
     var showsCompactStatus: Bool {
@@ -59,12 +77,18 @@ final class Preferences {
             Key.showBatteryTime: true,
             Key.showTemperature: true,
             Key.display: DisplayChoice.automatic.rawValue,
+            Key.openOnHover: true,
+            Key.haptics: true,
+            Key.terminalEnabled: true,
         ])
         let interval = defaults.double(forKey: Key.refreshInterval)
         refreshInterval = Self.refreshOptions.contains(interval) ? interval : 2
         showBatteryTime = defaults.bool(forKey: Key.showBatteryTime)
         showTemperature = defaults.bool(forKey: Key.showTemperature)
         display = DisplayChoice(rawValue: defaults.string(forKey: Key.display) ?? "") ?? .automatic
+        openOnHover = defaults.bool(forKey: Key.openOnHover)
+        haptics = defaults.bool(forKey: Key.haptics)
+        terminalEnabled = defaults.bool(forKey: Key.terminalEnabled)
         launchAtLogin = Self.loginItemEnabled
     }
 
